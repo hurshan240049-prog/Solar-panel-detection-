@@ -1,0 +1,162 @@
+import os
+import json
+import math
+import requests
+import numpy as np
+import pandas as pd
+from io import BytesIO
+from PIL import Image
+from ultralytics import YOLO
+from google.colab import files   # <-- ADDED for file upload dialog
+
+
+# ----------------------------------------------------
+# 1. ACCURATE METERS PER PIXEL (Google Web Mercator)
+# ----------------------------------------------------
+def meters_per_pixel(lat, zoom):
+    return 156543.03392 * math.cos(lat * math.pi / 180) / (2 ** zoom)
+
+
+# ----------------------------------------------------
+# 2. FETCH HIGH-QUALITY GOOGLE STATIC TILE
+# ----------------------------------------------------
+def fetch_google_image(lat, lon, api_key, zoom=21, size="640x640", scale=2):
+    url = (
+        f"https://maps.googleapis.com/maps/api/staticmap?"
+        f"center={lat},{lon}"
+        f"&zoom={zoom}"
+        f"&size={size}"
+        f"&scale={scale}"
+        f"&maptype=satellite"
+        f"&key={api_key}"
+    )
+
+    r = requests.get(url)
+    img = Image.open(BytesIO(r.content))
+    img_path = "input_tile.png"
+    img.save(img_path)
+
+    print(f"✓ Downloaded Google Static Tile → {img_path} (zoom={zoom}, scale={scale})")
+    return img_path, zoom
+
+
+# ----------------------------------------------------
+# 3. LOAD YOLO MODEL
+# ----------------------------------------------------
+def load_model():
+    model_path = "models/best.pt"   # evaluator-friendly relative path
+    return YOLO(model_path)
+
+
+# ----------------------------------------------------
+# 4. PANEL AREA (m²)
+# ----------------------------------------------------
+def compute_area(mask, m_per_pixel):
+    return float(np.sum(mask) * (m_per_pixel ** 2))
+
+
+# ----------------------------------------------------
+# 5. JSON FORMAT REQUIRED BY IDEATHON
+# ----------------------------------------------------
+def build_json(sample_id, lat, lon, has_solar, conf, area, buffer_radius, qc):
+    return {
+        "sample_id": sample_id,
+        "lat": lat,
+        "lon": lon,
+        "has_solar": has_solar,
+        "confidence": conf,
+        "pv_area_sqm_est": area,
+        "buffer_radius_sqft": buffer_radius,
+        "qc_status": qc,
+        "bbox_or_mask": "see overlay",
+        "image_metadata": {"source": "Google Static Maps", "capture_date": "NA"}
+    }
+
+
+# ----------------------------------------------------
+# 6. PROCESS ONE SITE
+# ----------------------------------------------------
+def process_site(sample_id, lat, lon, api_key, model, output_dir):
+
+    print(f"\n📍 Processing sample {sample_id} at ({lat}, {lon})")
+
+    # Step 1 — Download tile
+    img_path, zoom_used = fetch_google_image(lat, lon, api_key)
+
+    # Step 2 — Accurate meter-per-pixel
+    mpp = meters_per_pixel(lat, zoom_used)
+
+    # Step 3 — YOLO inference
+    result = model.predict(img_path, imgsz=640, conf=0.25)[0]
+
+    # Default fields
+    has_solar = False
+    buffer_radius = 2400
+    confidence = 0.0
+    area = 0.0
+    qc = "NOT_VERIFIABLE"
+
+    # If panels detected
+    if result.masks is not None and len(result.masks.data) > 0:
+
+        has_solar = True
+        buffer_radius = 1200
+
+        largest_mask = max(result.masks.data, key=lambda m: m.sum()).cpu().numpy()
+        confidence = float(result.boxes.conf.max().item())
+        area = compute_area(largest_mask, mpp)
+        qc = "VERIFIABLE"
+
+    # Save overlay
+    overlay_path = os.path.join(output_dir, f"{sample_id}_overlay.png")
+    result.save(filename=overlay_path)
+
+    # Save JSON
+    json_obj = build_json(sample_id, lat, lon, has_solar, confidence, area, buffer_radius, qc)
+    json_path = os.path.join(output_dir, f"{sample_id}.json")
+
+    with open(json_path, "w") as f:
+        json.dump(json_obj, f, indent=4)
+
+    print(f"   → Saved JSON: {json_path}")
+    print(f"   → Saved Overlay: {overlay_path}")
+
+
+# ----------------------------------------------------
+# 7. MAIN (UPLOAD EXCEL → PROCESS ALL ROWS)
+# ----------------------------------------------------
+def main():
+
+    print("📁 Please upload your Excel file (with sample_id, latitude, longitude):")
+    uploaded = files.upload()   # evaluator selects file
+    excel_name = list(uploaded.keys())[0]
+
+    df = pd.read_excel(excel_name)
+
+    # Create output folder
+    output_dir = "output"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Load YOLO model once
+    model = load_model()
+
+    API_KEY = "AIzaSyCPhzD4c57ikeWlngWR0AISnWLWDqw9r5k"
+
+    for _, row in df.iterrows():
+        process_site(
+            row["sample_id"],
+            row["latitude"],
+            row["longitude"],
+            API_KEY,
+            model,
+            output_dir
+        )
+
+    print("\n✅ All locations processed. Check the /output folder.")
+
+
+# ----------------------------------------------------
+# RUN
+# ----------------------------------------------------
+if __name__ == "__main__":
+    main()
