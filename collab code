@@ -7,18 +7,18 @@ import pandas as pd
 from io import BytesIO
 from PIL import Image
 from ultralytics import YOLO
-from google.colab import files   # <-- ADDED for file upload dialog
+from google.colab import files   # For uploading Excel
 
 
 # ----------------------------------------------------
-# 1. ACCURATE METERS PER PIXEL (Google Web Mercator)
+# 1. ACCURATE METERS PER PIXEL
 # ----------------------------------------------------
 def meters_per_pixel(lat, zoom):
     return 156543.03392 * math.cos(lat * math.pi / 180) / (2 ** zoom)
 
 
 # ----------------------------------------------------
-# 2. FETCH HIGH-QUALITY GOOGLE STATIC TILE
+# 2. FETCH GOOGLE STATIC TILE
 # ----------------------------------------------------
 def fetch_google_image(lat, lon, api_key, zoom=21, size="640x640", scale=2):
     url = (
@@ -44,7 +44,7 @@ def fetch_google_image(lat, lon, api_key, zoom=21, size="640x640", scale=2):
 # 3. LOAD YOLO MODEL
 # ----------------------------------------------------
 def load_model():
-    model_path = "models/best.pt"   # evaluator-friendly relative path
+    model_path = "models/best.pt"  # evaluator-friendly relative path
     return YOLO(model_path)
 
 
@@ -52,7 +52,9 @@ def load_model():
 # 4. PANEL AREA (m²)
 # ----------------------------------------------------
 def compute_area(mask, m_per_pixel):
-    return float(np.sum(mask) * (m_per_pixel ** 2))
+    pixel_count = np.sum(mask)
+    area_m2 = pixel_count * (m_per_pixel ** 2)
+    return float(area_m2)
 
 
 # ----------------------------------------------------
@@ -65,11 +67,14 @@ def build_json(sample_id, lat, lon, has_solar, conf, area, buffer_radius, qc):
         "lon": lon,
         "has_solar": has_solar,
         "confidence": conf,
-        "pv_area_sqm_est": area,
+        "pv_area_sqm_est": f"{area:.3f} sqm",   # <-- ADDED UNIT HERE
         "buffer_radius_sqft": buffer_radius,
         "qc_status": qc,
         "bbox_or_mask": "see overlay",
-        "image_metadata": {"source": "Google Static Maps", "capture_date": "NA"}
+        "image_metadata": {
+            "source": "Google Static Maps",
+            "capture_date": "NA"
+        }
     }
 
 
@@ -96,7 +101,7 @@ def process_site(sample_id, lat, lon, api_key, model, output_dir):
     area = 0.0
     qc = "NOT_VERIFIABLE"
 
-    # If panels detected
+    # If solar detected
     if result.masks is not None and len(result.masks.data) > 0:
 
         has_solar = True
@@ -128,16 +133,14 @@ def process_site(sample_id, lat, lon, api_key, model, output_dir):
 def main():
 
     print("📁 Please upload your Excel file (with sample_id, latitude, longitude):")
-    uploaded = files.upload()   # evaluator selects file
+    uploaded = files.upload()
     excel_name = list(uploaded.keys())[0]
 
     df = pd.read_excel(excel_name)
 
-    # Create output folder
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
 
-    # Load YOLO model once
     model = load_model()
 
     API_KEY = "AIzaSyCPhzD4c57ikeWlngWR0AISnWLWDqw9r5k"
@@ -156,8 +159,7 @@ def main():
 
 
 # ----------------------------------------------------
-# RUN
-# ----------------------------------------------------
+# RUN FIXED
 # ----------------------------------------------------
 if __name__ == "__main__":
     main()
